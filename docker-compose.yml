@@ -1,0 +1,33 @@
+version: "3.9"
+services:
+  snort-toolkit:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/srv/data
+    environment:
+      - SYNC_INTERVAL_HOURS=6
+      # - SNORT_RULES_URL=https://www.snort.org/downloads/community/snort3-community-rules.tar.gz
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # 7/24 canlı ve HTTPS için basit reverse proxy (otomatik Let's Encrypt sertifikası)
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+    depends_on:
+      - snort-toolkit
+
+volumes:
+  caddy_data:

@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Snort → Palo Alto Dönüştürücü &amp; Test Toolkit</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="eyebrow"><span class="dot"></span> LIVE RULESET SYNC · SNORT3 COMMUNITY</div>
+  <h1>SID gir, <span>Palo Alto imzasına</span> dönüştür,<br>gerçek trafikle test et.</h1>
+  <p class="subtitle">
+    Bir Snort Signature ID girin. Sistem kuralı senkronize veritabanından bulur,
+    onu tetikleyecek örnek bir HTTP isteği üretir, Palo Alto Custom Vulnerability
+    Signature formatına çevirir ve temiz kurumsal trafiğe karşı false-positive testi yapar.
+  </p>
+
+  <div class="console">
+    <span class="prompt">sid://</span>
+    <input id="sidInput" type="text" placeholder="örn. 1000004" autocomplete="off" />
+    <button class="btn btn-primary" id="runBtn">Analiz Et</button>
+  </div>
+
+  <div class="toolbar">
+    <button class="btn btn-ghost" id="syncOfflineBtn">Offline demo veri seti ile senkronize et</button>
+    <button class="btn btn-ghost" id="syncLiveBtn">Canlı kaynaktan senkronize et (snort.org)</button>
+    <button class="btn btn-ghost" id="listBtn">Mevcut SID'leri listele</button>
+  </div>
+
+  <div id="stateMsg" class="state-msg"></div>
+
+  <div class="pipeline" id="pipeline">
+    <div class="stage" data-stage="find"><div class="node">1</div><div class="label">SID Bul</div></div>
+    <div class="stage" data-stage="http"><div class="node">2</div><div class="label">HTTP Üret</div></div>
+    <div class="stage" data-stage="pan"><div class="node">3</div><div class="label">PAN Dönüştür</div></div>
+    <div class="stage" data-stage="test"><div class="node">4</div><div class="label">Test Et</div></div>
+  </div>
+
+  <!-- Rule panel -->
+  <div class="panel" id="rulePanel">
+    <div class="panel-head"><h3>Snort Kuralı</h3><span class="tag" id="ruleTag"></span></div>
+    <div class="panel-body">
+      <div class="rule-meta" id="ruleMeta"></div>
+      <pre id="ruleRaw"></pre>
+    </div>
+  </div>
+
+  <!-- HTTP panel -->
+  <div class="panel" id="httpPanel">
+    <div class="panel-head"><h3>Üretilen Tetikleyici HTTP İsteği</h3><span class="tag">RAW HTTP/1.1</span></div>
+    <div class="panel-body">
+      <div class="copy-row"><button class="copy-btn" onclick="copyBlock('httpRaw')">Kopyala</button></div>
+      <pre id="httpRaw"></pre>
+      <div class="notice" id="httpNotes"></div>
+    </div>
+  </div>
+
+  <!-- Palo Alto panel -->
+  <div class="panel" id="panPanel">
+    <div class="panel-head"><h3>Palo Alto Custom Vulnerability Signature</h3><span class="tag" id="panTag"></span></div>
+    <div class="panel-body">
+      <div class="copy-row"><button class="copy-btn" onclick="copyBlock('panXml')">XML kopyala</button></div>
+      <pre id="panXml"></pre>
+      <div class="copy-row" style="margin-top:16px;"><button class="copy-btn" onclick="copyBlock('panCli')">CLI kopyala</button></div>
+      <pre id="panCli"></pre>
+      <div class="notice" id="panWarnings"></div>
+    </div>
+  </div>
+
+  <!-- Test panel -->
+  <div class="panel" id="testPanel">
+    <div class="panel-head"><h3>Test ve False-Positive Raporu</h3><span class="tag">PCAP tabanlı simülasyon</span></div>
+    <div class="panel-body">
+      <div id="testSummaryBadge"></div>
+      <div class="test-grid">
+        <div class="test-card">
+          <div class="t-label">True Positive (tetikleyici istek)</div>
+          <div class="t-value" id="tpValue">–</div>
+        </div>
+        <div class="test-card">
+          <div class="t-label">False Positive Oranı (temiz trafik havuzu)</div>
+          <div class="t-value" id="fpValue">–</div>
+        </div>
+      </div>
+      <div style="margin-top:20px;">
+        <div class="t-label" style="margin-bottom:8px;">Temiz trafik havuzu detayı</div>
+        <div id="fpList"></div>
+      </div>
+      <div class="copy-row" style="margin-top:16px;"><button class="copy-btn" id="downloadPcapBtn">PCAP indir</button></div>
+    </div>
+  </div>
+
+  <!-- SID list panel -->
+  <div class="panel" id="listPanel">
+    <div class="panel-head"><h3>Veritabanındaki SID'ler</h3><span class="tag" id="listTag"></span></div>
+    <div class="panel-body" id="listBody"></div>
+  </div>
+
+  <footer>Snort → Palo Alto Toolkit · Yalnızca kural içinde zaten yayınlanmış desenlerden sentetik test trafiği üretir · Gerçek exploit/payload üretmez</footer>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

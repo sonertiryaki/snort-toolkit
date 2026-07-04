@@ -1,0 +1,15 @@
+# Bu dosya, ağ erişimi olmayan ortamlarda (offline demo) toolkit'i test etmek
+# için hazırlanmış ÖRNEK kurallardır. Gerçek snort.org community ruleset
+# içeriği değildir; formatı ve mantığı birebir uyumludur.
+
+alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"DEMO WEB-ATTACK generic directory traversal attempt"; flow:to_server,established; content:"../../"; http_uri; classtype:web-application-attack; sid:1000001; rev:1; metadata:ruleset community;)
+
+alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"DEMO WEB-ATTACK suspicious admin console probe"; flow:to_server,established; content:"/admin_console.php"; http_uri; nocase; classtype:web-application-attack; sid:1000002; rev:1; metadata:ruleset community;)
+
+alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"DEMO MALWARE-CNC known bad user-agent beacon"; flow:to_server,established; content:"EvilBeaconClient/1.0"; http_user_agent; classtype:trojan-activity; sid:1000003; rev:1; metadata:ruleset community;)
+
+alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"DEMO SQL injection attempt in URI parameter"; flow:to_server,established; content:"UNION"; http_uri; nocase; content:"SELECT"; http_uri; nocase; distance:0; classtype:web-application-attack; sid:1000004; rev:1; metadata:ruleset community;)
+
+alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"DEMO WEB-ATTACK command injection via POST body"; flow:to_server,established; content:"cmd="; http_client_body; content:"/bin/sh"; http_client_body; distance:0; classtype:web-application-attack; sid:1000005; rev:1; metadata:ruleset community;)
+
+alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"DEMO WEB-ATTACK suspicious X-Forwarded-Host header spoof"; flow:to_server,established; content:"X-Forwarded-Host: attacker.example"; http_header; classtype:attempted-recon; sid:1000006; rev:1; metadata:ruleset community;)
