@@ -47,6 +47,7 @@ class SyncLog(SQLModel, table=True):
     finished_at: Optional[datetime] = None
     status: str = "running"  # running | success | failed
     rules_ingested: int = 0
+    rules_skipped: int = 0          # ayrıştırılamayan/hatalı satır sayısı
     source_used: Optional[str] = None      # url ya da "manual-upload"
     snort_version: Optional[str] = None    # bu senkronizasyonun etiketlediği sürüm
     file_name: Optional[str] = None        # yüklenen dosyanın adı (elle yüklemede)

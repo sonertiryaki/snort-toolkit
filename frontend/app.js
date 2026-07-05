@@ -107,23 +107,25 @@ async function loadSources() {
 async function loadStatus() {
   try {
     const s = await apiGet("/api/status");
-    document.getElementById("statTotal").textContent = s.total_rules ?? "0";
+    document.getElementById("statTotal").textContent = `${s.total_rules ?? 0} kural`;
 
     const lu = s.last_update_overall;
     document.getElementById("statLastUpdate").textContent = lu
-      ? `${fmtDate(lu.finished_at)} · ${lu.source || ""} (${lu.rules_ingested} kural)`
+      ? `${fmtDate(lu.finished_at)}\n${lu.source || "-"} · ${lu.snort_version || "-"} sürümü · ${lu.rules_ingested} kural eklendi`
       : "Henüz senkronizasyon yapılmadı";
 
     const up = s.last_manual_upload;
     document.getElementById("statLastUpload").textContent = up
-      ? `${up.file_name} · ${fmtDate(up.finished_at)} (${up.rules_ingested} kural, v${up.snort_version})`
+      ? `${up.file_name}\n${fmtDate(up.finished_at)} · sürüm ${up.snort_version} · ${up.rules_ingested} kural`
       : "Henüz dosya yüklenmedi";
 
-    const byVersion = s.rules_by_version || {};
-    const parts = Object.entries(byVersion)
-      .filter(([, count]) => count > 0)
-      .map(([v, count]) => `${v}: ${count}`);
-    document.getElementById("statByVersion").textContent = parts.length ? parts.join(" · ") : "–";
+    const versions = (s.versions || []).filter((v) => v.count > 0);
+    const listEl = document.getElementById("versionBreakdownList");
+    listEl.innerHTML = versions.length
+      ? versions
+          .map((v) => `<div class="vb-pill">Snort <b>${escapeHtml(v.snort_version)}</b> → ${v.count} kural</div>`)
+          .join("")
+      : `<span style="color:var(--text-low);font-size:13px;">Henüz kural yok — önce bir senkronizasyon/yükleme yapın.</span>`;
   } catch (e) {
     console.error("Durum bilgisi yüklenemedi", e);
   }
@@ -275,7 +277,7 @@ async function doOfflineSync() {
   setState("Offline demo veri seti (3.x + 2.9) yükleniyor...");
   try {
     const r = await apiPost("/api/sync/offline-sample");
-    setState(`Senkronizasyon tamam: ${r.rules_ingested} kural yüklendi.`);
+    setState(`Senkronizasyon tamam: ${r.rules_ingested} kural yüklendi.` + (r.rules_skipped ? ` (${r.rules_skipped} satır atlandı)` : ""));
     await loadStatus();
   } catch (e) {
     setState("Hata: " + e.message, true);
@@ -289,7 +291,11 @@ async function doSyncAll() {
     const results = await apiPost("/api/sync/all");
     const okCount = results.filter((r) => r.status === "success").length;
     const totalRules = results.reduce((sum, r) => sum + (r.rules_ingested || 0), 0);
-    setState(`${okCount}/${results.length} kaynak başarıyla senkronize edildi, toplam ${totalRules} kural.`);
+    const totalSkipped = results.reduce((sum, r) => sum + (r.rules_skipped || 0), 0);
+    setState(
+      `${okCount}/${results.length} kaynak başarıyla senkronize edildi, toplam ${totalRules} kural eklendi` +
+        (totalSkipped ? `, ${totalSkipped} satır atlandı.` : ".")
+    );
     await loadStatus();
   } catch (e) {
     setState("Hata: " + e.message, true);
@@ -303,7 +309,10 @@ async function doSyncOne() {
   try {
     const r = await apiPost(`/api/sync/source/${key}`);
     if (r.status === "success") {
-      setState(`Senkronizasyon tamam: ${r.rules_ingested} kural (sürüm ${r.snort_version}).`);
+      setState(
+        `Senkronizasyon tamam: ${r.rules_ingested} kural (sürüm ${r.snort_version}).` +
+          (r.rules_skipped ? ` ${r.rules_skipped} satır atlandı.` : "")
+      );
     } else {
       setState(`Senkronizasyon başarısız: ${r.error}`, true);
     }
@@ -327,7 +336,10 @@ async function doUpload() {
     formData.append("file", file);
     formData.append("snort_version", version);
     const r = await apiPost("/api/upload-rules", { body: formData });
-    setState(`Dosya yüklendi: ${r.rules_ingested} kural eklendi/güncellendi (sürüm ${r.snort_version}).`);
+    setState(
+      `Dosya yüklendi: ${r.rules_ingested} kural eklendi/güncellendi (sürüm ${r.snort_version}).` +
+        (r.rules_skipped ? ` ${r.rules_skipped} satır atlandı.` : "")
+    );
     await loadStatus();
   } catch (e) {
     setState("Hata: " + e.message, true);
@@ -336,12 +348,14 @@ async function doUpload() {
 
 async function listRules() {
   resetPipeline();
-  setState("SID listesi getiriliyor...");
+  const version = els.versionSelect.value;
+  setState(version ? `'${version}' sürümündeki SID'ler getiriliyor...` : "Tüm sürümlerden SID'ler getiriliyor...");
   try {
-    const version = els.versionSelect.value;
-    const qs = version ? `?snort_version=${encodeURIComponent(version)}&limit=100` : "?limit=100";
+    const qs = version ? `?snort_version=${encodeURIComponent(version)}&limit=2000` : "?limit=2000";
     const rules = await apiGet(`/api/rules${qs}`);
-    document.getElementById("listTag").textContent = `${rules.length} kural`;
+    document.getElementById("listTag").textContent = version
+      ? `${rules.length} kural (sürüm: ${version})`
+      : `${rules.length} kural (tüm sürümler, en fazla 2000 gösterilir)`;
     document.getElementById("listBody").innerHTML = rules.length
       ? `<div class="rule-meta" style="flex-direction:column;gap:6px;">${rules
           .map(
@@ -351,7 +365,7 @@ async function listRules() {
           .join("")}</div>`
       : `<p style="color:var(--text-mid);font-size:13px;">Henüz senkronize edilmiş kural yok. Önce senkronizasyon çalıştırın.</p>`;
     show("listPanel");
-    setState(`${rules.length} kural listelendi.`);
+    setState(`${rules.length} kural listelendi. Sürüme göre toplam sayılar için yukarıdaki "Tüm istatistikleri ayrı sekmede aç" linkini kullanabilirsiniz.`);
   } catch (e) {
     setState("Hata: " + e.message, true);
   }

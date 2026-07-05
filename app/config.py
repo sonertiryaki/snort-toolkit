@@ -1,12 +1,19 @@
 import os
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./snort_toolkit.db")
+DATA_DIR = os.getenv("DATA_DIR", "./data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# ÖNEMLİ DÜZELTME: Veritabanı dosyası artık DATA_DIR'in İÇİNDE oluşturuluyor.
+# Önceki sürümde varsayılan yol './snort_toolkit.db' idi — bu, docker-compose
+# içindeki kalıcı disk (volume) olarak tanımlanan './data' klasörünün DIŞINDA
+# kalıyordu. Sonuç: container her yeniden oluşturulduğunda (deploy, restart,
+# `docker compose up --build`) veritabanı sıfırlanıyordu. Şimdi dosya
+# DATA_DIR içinde olduğu için VPS/Oracle gibi kalıcı disk kullanan
+# ortamlarda gerçekten kalıcı olacak.
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DATA_DIR}/snort_toolkit.db")
 
 # Kaç saatte bir otomatik senkronizasyon yapılacağı (7/24 canlı servis için)
 SYNC_INTERVAL_HOURS = int(os.getenv("SYNC_INTERVAL_HOURS", "6"))
-
-DATA_DIR = os.getenv("DATA_DIR", "./data")
-os.makedirs(DATA_DIR, exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # Çoklu Snort sürümü kaynakları.

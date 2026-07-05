@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>İstatistikler · Snort → Palo Alto Toolkit</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+  .stats-wrap{max-width:900px;margin:0 auto;padding:40px 24px 80px;}
+  .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin:24px 0;}
+  .stat-card{background:var(--bg-1);border:1px solid var(--line);border-radius:10px;padding:18px;}
+  .stat-card .num{font-family:var(--mono);font-size:28px;font-weight:700;color:var(--teal);}
+  .stat-card .lbl{font-size:12px;color:var(--text-mid);margin-top:4px;}
+  table{width:100%;border-collapse:collapse;margin-top:10px;}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);font-size:13px;}
+  th{color:var(--text-mid);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;}
+  td{font-family:var(--mono);color:var(--text-hi);}
+  tr:hover td{background:var(--bg-2);}
+  .search-row{display:flex;gap:10px;margin:20px 0 10px;}
+  .search-row input, .search-row select{flex:1;}
+  input[type="search"]{
+    background:var(--bg-2);border:1px solid var(--line);border-radius:7px;color:var(--text-hi);
+    padding:10px 12px;font-family:var(--sans);font-size:13px;
+  }
+  .pager{display:flex;gap:8px;justify-content:center;margin-top:16px;}
+  .backlink{color:var(--teal);font-family:var(--mono);font-size:13px;text-decoration:none;}
+</style>
+</head>
+<body>
+<div class="stats-wrap">
+  <div class="eyebrow"><span class="dot"></span> İSTATİSTİKLER</div>
+  <h1>Veritabanı <span>durumu</span> ve sürüm dağılımı</h1>
+  <a href="index.html" class="backlink">← Ana sayfaya dön</a>
+
+  <div class="stats-grid" id="summaryCards"></div>
+
+  <div class="panel show">
+    <div class="panel-head"><h3>Son güncelleme bilgisi</h3></div>
+    <div class="panel-body" id="lastUpdateBody"></div>
+  </div>
+
+  <div class="panel show">
+    <div class="panel-head"><h3>Sürüme göre kural sayısı</h3></div>
+    <div class="panel-body">
+      <table id="versionTable">
+        <thead><tr><th>Snort Sürümü</th><th>Kural Sayısı</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel show">
+    <div class="panel-head"><h3>Kural listesi</h3><span class="tag" id="listCountTag"></span></div>
+    <div class="panel-body">
+      <div class="search-row">
+        <select id="versionFilter"></select>
+        <input type="search" id="searchBox" placeholder="SID veya mesaj içinde ara..." />
+      </div>
+      <table id="rulesTable">
+        <thead><tr><th>SID</th><th>Rev</th><th>Sınıf</th><th>Mesaj</th></tr></thead>
+        <tbody id="rulesTbody"></tbody>
+      </table>
+      <div class="pager">
+        <button class="btn btn-ghost" id="prevPage">← Önceki</button>
+        <span class="state-msg" id="pageInfo" style="margin:0;align-self:center;"></span>
+        <button class="btn btn-ghost" id="nextPage">Sonraki →</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="stats.js"></script>
+</body>
+</html>

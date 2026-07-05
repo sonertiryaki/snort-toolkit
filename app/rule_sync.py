@@ -68,72 +68,88 @@ def _ingest_lines(
     snort_version: str,
     ruleset_source: str,
     source_file: Optional[str] = None,
-) -> int:
-    """Verilen kural satırlarını parse edip (sid, snort_version) bazında upsert eder."""
+) -> "tuple[int, int]":
+    """Verilen kural satırlarını parse edip (sid, snort_version) bazında upsert eder.
+
+    Döner: (başarıyla işlenen kural sayısı, atlanan/hatalı satır sayısı).
+    Tek bir bozuk satır (ör. byte_extract değişkeni, bilinmeyen sözdizimi)
+    tüm senkronizasyonu ÇÖKERTMEZ — sadece o satır atlanır.
+    """
     ingested = 0
+    skipped = 0
     for raw_line in lines:
-        parsed = parse_rule(raw_line)
-        if not parsed or not parsed.sid:
+        try:
+            parsed = parse_rule(raw_line)
+            if not parsed or not parsed.sid:
+                continue
+        except Exception:
+            logger.warning("Ayrıştırılamayan satır atlandı: %s", raw_line[:120])
+            skipped += 1
             continue
 
-        options_dump = {
-            "contents": [
-                {
-                    "pattern_raw": c.pattern_raw,
-                    "nocase": c.nocase,
-                    "http_buffer": c.http_buffer,
-                    "negated": c.negated,
-                }
-                for c in parsed.contents
-            ],
-            "pcres": [{"regex": p.regex, "flags": p.flags} for p in parsed.pcres],
-            "references": parsed.references,
-            "metadata": parsed.metadata,
-            "flow": parsed.flow,
-        }
+        try:
+            options_dump = {
+                "contents": [
+                    {
+                        "pattern_raw": c.pattern_raw,
+                        "nocase": c.nocase,
+                        "http_buffer": c.http_buffer,
+                        "negated": c.negated,
+                    }
+                    for c in parsed.contents
+                ],
+                "pcres": [{"regex": p.regex, "flags": p.flags} for p in parsed.pcres],
+                "references": parsed.references,
+                "metadata": parsed.metadata,
+                "flow": parsed.flow,
+            }
 
-        existing = session.exec(
-            select(SnortRule).where(
-                SnortRule.sid == parsed.sid, SnortRule.snort_version == snort_version
-            )
-        ).first()
-
-        if existing:
-            existing.rev = parsed.rev
-            existing.msg = parsed.msg
-            existing.classtype = parsed.classtype
-            existing.raw_rule = parsed.raw
-            existing.options_json = json.dumps(options_dump)
-            existing.ruleset_source = ruleset_source
-            existing.source_file = source_file
-            existing.synced_at = datetime.utcnow()
-            session.add(existing)
-        else:
-            session.add(
-                SnortRule(
-                    sid=parsed.sid,
-                    snort_version=snort_version,
-                    gid=parsed.gid,
-                    rev=parsed.rev,
-                    msg=parsed.msg,
-                    classtype=parsed.classtype,
-                    action=parsed.action,
-                    protocol=parsed.protocol,
-                    src=parsed.src,
-                    src_port=parsed.src_port,
-                    direction=parsed.direction,
-                    dst=parsed.dst,
-                    dst_port=parsed.dst_port,
-                    raw_rule=parsed.raw,
-                    options_json=json.dumps(options_dump),
-                    ruleset_source=ruleset_source,
-                    source_file=source_file,
+            existing = session.exec(
+                select(SnortRule).where(
+                    SnortRule.sid == parsed.sid, SnortRule.snort_version == snort_version
                 )
-            )
-        ingested += 1
+            ).first()
+
+            if existing:
+                existing.rev = parsed.rev
+                existing.msg = parsed.msg
+                existing.classtype = parsed.classtype
+                existing.raw_rule = parsed.raw
+                existing.options_json = json.dumps(options_dump)
+                existing.ruleset_source = ruleset_source
+                existing.source_file = source_file
+                existing.synced_at = datetime.utcnow()
+                session.add(existing)
+            else:
+                session.add(
+                    SnortRule(
+                        sid=parsed.sid,
+                        snort_version=snort_version,
+                        gid=parsed.gid,
+                        rev=parsed.rev,
+                        msg=parsed.msg,
+                        classtype=parsed.classtype,
+                        action=parsed.action,
+                        protocol=parsed.protocol,
+                        src=parsed.src,
+                        src_port=parsed.src_port,
+                        direction=parsed.direction,
+                        dst=parsed.dst,
+                        dst_port=parsed.dst_port,
+                        raw_rule=parsed.raw,
+                        options_json=json.dumps(options_dump),
+                        ruleset_source=ruleset_source,
+                        source_file=source_file,
+                    )
+                )
+            ingested += 1
+        except Exception:
+            logger.warning("SID %s işlenemedi, atlandı.", getattr(parsed, "sid", "?"))
+            skipped += 1
+            continue
 
     session.commit()
-    return ingested
+    return ingested, skipped
 
 
 def sync_offline_sample(session: Session) -> SyncLog:
@@ -146,7 +162,7 @@ def sync_offline_sample(session: Session) -> SyncLog:
     session.refresh(log)
 
     try:
-        ingested = _ingest_lines(
+        ingested, skipped = _ingest_lines(
             session,
             _iter_rule_lines_from_local_sample(),
             snort_version="3.x",
@@ -154,11 +170,12 @@ def sync_offline_sample(session: Session) -> SyncLog:
         )
         with open("app/sample_rules_legacy_29.rules", "r", encoding="utf-8") as f:
             legacy_lines = f.readlines()
-        ingested += _ingest_lines(
+        ingested2, skipped2 = _ingest_lines(
             session, legacy_lines, snort_version="2.9", ruleset_source="offline-sample"
         )
         log.status = "success"
-        log.rules_ingested = ingested
+        log.rules_ingested = ingested + ingested2
+        log.rules_skipped = skipped + skipped2
     except Exception as e:
         logger.exception("Offline örnek yükleme başarısız")
         log.status = "failed"
@@ -190,11 +207,12 @@ def sync_source(session: Session, source_key: str) -> SyncLog:
             )
         content = _download(spec["url"])
         lines = _iter_rule_lines_from_archive(content)
-        ingested = _ingest_lines(
+        ingested, skipped = _ingest_lines(
             session, lines, snort_version=spec["snort_version"], ruleset_source=spec["key"]
         )
         log.status = "success"
         log.rules_ingested = ingested
+        log.rules_skipped = skipped
     except Exception as e:
         logger.exception("Senkronizasyon başarısız: %s", source_key)
         log.status = "failed"
@@ -234,7 +252,7 @@ def ingest_uploaded_file(
 
     try:
         lines = _iter_rule_lines_from_archive(content)
-        ingested = _ingest_lines(
+        ingested, skipped = _ingest_lines(
             session,
             lines,
             snort_version=snort_version,
@@ -244,10 +262,12 @@ def ingest_uploaded_file(
         if ingested == 0:
             raise RuntimeError(
                 "Dosyadan hiçbir geçerli Snort kuralı (sid içeren satır) çıkarılamadı. "
-                "Dosyanın .rules formatında olduğundan emin olun."
+                "Dosyanın .rules formatında olduğundan (ya da içindeki .rules dosyalarını "
+                "barındıran bir .tar.gz olduğundan) emin olun."
             )
         log.status = "success"
         log.rules_ingested = ingested
+        log.rules_skipped = skipped
     except Exception as e:
         logger.exception("Manuel dosya yükleme başarısız: %s", file_name)
         log.status = "failed"

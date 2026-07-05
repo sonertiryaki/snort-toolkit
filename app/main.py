@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
-from sqlalchemy import func
+from sqlalchemy import func, String, cast
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.database import init_db, get_session, engine
@@ -128,6 +128,7 @@ def _log_to_dict(log: SyncLog) -> dict:
     return {
         "status": log.status,
         "rules_ingested": log.rules_ingested,
+        "rules_skipped": log.rules_skipped,
         "source_used": log.source_used,
         "snort_version": log.snort_version,
         "file_name": log.file_name,
@@ -203,17 +204,22 @@ def get_status(session: Session = Depends(get_session)):
                 "snort_version": spec["snort_version"],
                 "finished_at": log.finished_at,
                 "rules_ingested": log.rules_ingested,
+                "rules_skipped": log.rules_skipped,
             }
 
     return {
         "total_rules": total_rules,
         "rules_by_version": by_version,
+        "versions": [
+            {"snort_version": v, "count": c} for v, c in sorted(by_version.items(), key=lambda kv: -kv[1])
+        ],
         "last_update_overall": (
             {
                 "finished_at": last_overall.finished_at,
                 "source": last_overall.source_used,
                 "snort_version": last_overall.snort_version,
                 "rules_ingested": last_overall.rules_ingested,
+                "rules_skipped": last_overall.rules_skipped,
             }
             if last_overall
             else None
@@ -224,11 +230,42 @@ def get_status(session: Session = Depends(get_session)):
                 "snort_version": last_upload.snort_version,
                 "finished_at": last_upload.finished_at,
                 "rules_ingested": last_upload.rules_ingested,
+                "rules_skipped": last_upload.rules_skipped,
             }
             if last_upload
             else None
         ),
         "last_per_source": last_per_source,
+    }
+
+
+@app.get("/api/stats/rules")
+def get_stats_rules(
+    snort_version: str,
+    limit: int = 1000,
+    offset: int = 0,
+    q: Optional[str] = None,
+    session: Session = Depends(get_session),
+):
+    """İstatistik sayfası için: tek bir sürümün TÜM kurallarını (arama filtreli,
+    sayfalanabilir) döner. Toplam sayıyı da içerir ki '123 / 4200 gösteriliyor'
+    gibi okunabilir bir bilgi verilebilsin."""
+    base_query = select(SnortRule).where(SnortRule.snort_version == snort_version)
+    if q:
+        like = f"%{q}%"
+        base_query = base_query.where(
+            (SnortRule.msg.ilike(like)) | (cast(SnortRule.sid, String).ilike(like))
+        )
+
+    total = session.exec(select(func.count()).select_from(base_query.subquery())).one()
+    items = session.exec(base_query.offset(offset).limit(limit)).all()
+
+    return {
+        "snort_version": snort_version,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "items": [{"sid": r.sid, "rev": r.rev, "msg": r.msg, "classtype": r.classtype} for r in items],
     }
 
 

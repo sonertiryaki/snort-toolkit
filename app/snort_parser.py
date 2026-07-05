@@ -117,6 +117,16 @@ def _split_options(options_str: str) -> list:
     return options
 
 
+def _safe_int(value: str) -> Optional[int]:
+    """Değeri int'e çevirir; byte_extract ile tanımlanmış bir değişken adı
+    (ör. 'len', 'cPoolSize') gibi sayısal olmayan bir değerse None döner
+    (hatayı fırlatıp senkronizasyonun tamamını çökertmek yerine)."""
+    try:
+        return int(value.strip())
+    except (ValueError, AttributeError):
+        return None
+
+
 def parse_rule(raw_line: str) -> Optional[ParsedRule]:
     line = raw_line.strip()
     if not line or line.startswith("#"):
@@ -156,11 +166,11 @@ def parse_rule(raw_line: str) -> Optional[ParsedRule]:
             value = value.lstrip("!").strip()
 
         if key == "sid":
-            rule.sid = int(re.sub(r"\D", "", value) or 0)
+            rule.sid = _safe_int(re.sub(r"\D", "", value)) or 0
         elif key == "gid":
-            rule.gid = int(value)
+            rule.gid = _safe_int(value) or 1
         elif key == "rev":
-            rule.rev = int(value)
+            rule.rev = _safe_int(value) or 1
         elif key == "msg":
             rule.msg = value.strip('"')
         elif key == "classtype":
@@ -214,18 +224,19 @@ def parse_rule(raw_line: str) -> Optional[ParsedRule]:
                 rule.contents[-1].nocase = True
         elif key == "depth":
             if rule.contents:
-                rule.contents[-1].depth = int(value)
+                rule.contents[-1].depth = _safe_int(value)
         elif key == "offset":
             if rule.contents:
-                rule.contents[-1].offset = int(value)
+                rule.contents[-1].offset = _safe_int(value)
         elif key == "distance":
             if rule.contents:
-                rule.contents[-1].distance = int(value)
+                rule.contents[-1].distance = _safe_int(value)
         elif key == "within":
             if rule.contents:
-                rule.contents[-1].within = int(value)
-        # diğer option'lar (flowbits, fast_pattern, rawbytes, vb.) şimdilik
-        # eşleştirme/HTTP üretimi için kritik değil, sessizce atlanıyor.
+                rule.contents[-1].within = _safe_int(value)
+        # diğer option'lar (flowbits, fast_pattern, rawbytes, byte_extract,
+        # byte_test, vb.) şimdilik eşleştirme/HTTP üretimi için kritik değil,
+        # sessizce atlanıyor.
 
     # HTTP tahmini: port 80/443/8080 ya da http_* buffer kullanımı ya da protokol http ise
     if rule.protocol.lower() in ("http", "http2"):
