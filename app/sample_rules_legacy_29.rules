@@ -1,0 +1,8 @@
+# Bu dosya, Snort 2.9 tarzı eski sözdizimini (uricontent) göstermek için
+# hazırlanmış ÖRNEK/DEMO kurallardır. sid:1000002 ile KASITLI OLARAK aynı SID
+# kullanılır ki, aynı SID'in farklı sürümlerde farklı sözdizimiyle nasıl
+# saklandığını (bkz. /api/rule/{sid}/versions) gösterebilelim.
+
+alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"DEMO (2.9 syntax) suspicious admin console probe"; flow:to_server,established; uricontent:"/admin_console.php"; nocase; classtype:web-application-attack; sid:1000002; rev:1; metadata:ruleset community;)
+
+alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"DEMO (2.9 syntax) legacy cgi probe"; flow:to_server,established; uricontent:"/cgi-bin/test.cgi"; classtype:web-application-attack; sid:1000007; rev:1; metadata:ruleset community;)

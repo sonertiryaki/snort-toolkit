@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: snort-toolkit
+    plan: free
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: SYNC_INTERVAL_HOURS
+        value: "6"
+    healthCheckPath: /api/health

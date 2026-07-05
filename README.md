@@ -37,17 +37,52 @@ butonuna basın — bu, `app/sample_rules.rules` içindeki 6 örnek kuralı yük
 (sid: 1000001–1000006). Gerçek ortamda **"Canlı kaynaktan senkronize et"**
 butonu `snort.org`'un resmi `snort3-community-rules.tar.gz` dosyasını indirir.
 
+## Çoklu Snort sürümü desteği
+
+Aynı SID, farklı Snort sürümlerinde farklı sözdizimiyle (ör. Snort 3'te
+`http_uri` sticky buffer, Snort 2.x'te eski `uricontent`) yayınlanabildiği
+için veritabanı `(sid, snort_version)` ikilisine göre ayrı satırlar tutar.
+Desteklenen sürümler ve kaynakları `app/config.py` içindeki
+`RULESET_SOURCES` listesinde tanımlıdır:
+
+| Sürüm | Kaynak | Canlı senkronizasyon |
+|---|---|---|
+| 3.x | Snort 3 Community Rules (snort.org, resmi) | ✅ |
+| 2.9 | Snort 2.9 GPLv2 Community Rules (snort.org, resmi) | ✅ |
+| 2.9 | Emerging Threats Open (2.7/2.8/2.9 ile büyük ölçüde uyumlu) | ✅ |
+| 2.8 | — (EOL, resmi ücretsiz kaynak yok) | ❌ yalnızca dosya yükleme |
+| 2.7 | — (EOL, resmi ücretsiz kaynak yok) | ❌ yalnızca dosya yükleme |
+
+**Dürüstlük notu:** Cisco/Talos, Snort 2.7/2.8 gibi EOL sürümler için artık
+ücretsiz/kayıtsız bir community ruleset yayınlamıyor. Bu sürümler için
+gerçekçi yol, kendi elinizdeki `.rules` dosyalarını arayüzdeki **"Dosya
+Yükleyerek Veritabanını Güncelle"** özelliğiyle sisteme eklemektir.
+
+## Manuel dosya ile veritabanı güncelleme
+
+Arayüzdeki dosya seçiciden `.rules`, `.txt` ya da `.tar.gz`/`.tgz` uzantılı
+bir dosya seçip hedef Snort sürümünü belirleyip yükleyebilirsiniz. Sistem
+formatı otomatik algılar (tar arşivi / düz gzip / düz metin) ve içindeki
+her `sid:` içeren satırı ayrıştırıp veritabanına ekler/günceller.
+
 ## API uç noktaları
 
 | Method | Path | Açıklama |
 |---|---|---|
-| POST | `/api/sync?offline_sample=true|false` | Kural setini senkronize eder |
-| GET  | `/api/rules` | Veritabanındaki kuralları listeler |
-| GET  | `/api/rule/{sid}` | Ham Snort kuralını döner |
-| GET  | `/api/rule/{sid}/http` | Tetikleyici RAW HTTP isteğini üretir |
-| GET  | `/api/rule/{sid}/paloalto` | Palo Alto XML + CLI çıktısını üretir |
-| GET  | `/api/rule/{sid}/test` | PCAP tabanlı TP/FP raporu (base64 pcap dahil) |
-| GET  | `/api/rule/{sid}/full-report` | Yukarıdakilerin hepsini tek çağrıda döner |
+| GET  | `/api/sources` | Tanımlı tüm kaynak/sürümlerin listesi |
+| GET  | `/api/status` | Toplam kural sayısı, sürüme göre dağılım, son güncelleme/son yüklenen dosya bilgisi |
+| POST | `/api/sync/offline-sample` | Bundle edilmiş demo kuralları (3.x + 2.9) yükler |
+| POST | `/api/sync/all` | url tanımlı TÜM canlı kaynakları (3.x, 2.9 community, ET Open) senkronize eder |
+| POST | `/api/sync/source/{key}` | Tek bir kaynağı senkronize eder (ör. `snort3-community`) |
+| POST | `/api/upload-rules` | (multipart) Manuel `.rules`/`.tar.gz` dosyası yükler, `snort_version` form alanı zorunlu |
+| GET  | `/api/sync/history` | Son 30 senkronizasyon/yükleme kaydı |
+| GET  | `/api/rules?snort_version=&limit=` | Veritabanındaki kuralları listeler (sürüme göre filtrelenebilir) |
+| GET  | `/api/rule/{sid}/versions` | Bu SID'in hangi sürümlerde kayıtlı olduğunu döner |
+| GET  | `/api/rule/{sid}?snort_version=` | Ham Snort kuralını döner (sürüm verilmezse otomatik tercih sırası: 3.x → 2.9 → 2.8 → 2.7 → manual) |
+| GET  | `/api/rule/{sid}/http?snort_version=` | Tetikleyici RAW HTTP isteğini üretir |
+| GET  | `/api/rule/{sid}/paloalto?snort_version=` | Palo Alto XML + CLI çıktısını üretir |
+| GET  | `/api/rule/{sid}/test?snort_version=` | PCAP tabanlı TP/FP raporu (base64 pcap dahil) |
+| GET  | `/api/rule/{sid}/full-report?snort_version=` | Yukarıdakilerin hepsini tek çağrıda döner |
 
 ## 7/24 canlıya alma (production deployment)
 

@@ -183,6 +183,16 @@ def parse_rule(raw_line: str) -> Optional[ParsedRule]:
                 negated=negated,
             )
             rule.contents.append(content)
+        elif key == "uricontent":
+            raw_pattern = value.strip('"')
+            content = ContentMatch(
+                pattern_raw=raw_pattern,
+                pattern_bytes=decode_snort_content(raw_pattern),
+                negated=negated,
+                http_buffer="http_uri",
+            )
+            rule.contents.append(content)
+            rule.is_http = True
         elif key == "pcre":
             # pcre:"/regex/flags" ya da http buffer modifier'lı olabilir (Snort3: pcre ile aynı)
             pm = re.match(r'^"?/(?P<regex>.*)/(?P<flags>[A-Za-z]*)"?$', value)
