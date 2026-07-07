@@ -197,16 +197,25 @@ def sync_offline_sample(session: Session) -> SyncLog:
     return log
 
 
-def sync_source(session: Session, source_key: str) -> SyncLog:
-    """RULESET_SOURCES içindeki tek bir kaynağı (tek Snort sürümünü) senkronize eder."""
+def sync_source(session: Session, source_key: str, existing_log: Optional[SyncLog] = None) -> SyncLog:
+    """RULESET_SOURCES içindeki tek bir kaynağı (tek Snort sürümünü) senkronize eder.
+
+    existing_log verilirse (arka plan görevlerinde kullanılır), yeni bir log
+    oluşturmak yerine o kayıt güncellenir — böylece çağıran taraf log'u
+    hemen (senkronizasyon başlamadan önce) oluşturup id'sini kullanıcıya
+    dönebilir, kullanıcı ilerlemeyi bu id üzerinden takip edebilir.
+    """
     spec = next((s for s in RULESET_SOURCES if s["key"] == source_key), None)
     if not spec:
         raise ValueError(f"Bilinmeyen kaynak: {source_key}")
 
-    log = SyncLog(status="running", snort_version=spec["snort_version"], source_used=spec["label"])
-    session.add(log)
-    session.commit()
-    session.refresh(log)
+    if existing_log is not None:
+        log = existing_log
+    else:
+        log = SyncLog(status="running", snort_version=spec["snort_version"], source_used=spec["label"])
+        session.add(log)
+        session.commit()
+        session.refresh(log)
 
     try:
         if not spec["url"]:
@@ -241,6 +250,113 @@ def sync_all_live_sources(session: Session) -> list:
         if spec["url"]:
             results.append(sync_source(session, spec["key"]))
     return results
+
+
+# ---------------------------------------------------------------------------
+# ARKA PLAN (background) senkronizasyon görevleri.
+#
+# ÖNEMLİ: Canlı kaynaklar (özellikle "tüm sürümleri senkronize et") binlerce
+# kural indirip işleyebildiği için dakikalarca sürebilir. Bunu doğrudan bir
+# HTTP isteği içinde SENKRON yapmak, Render gibi platformlarda proxy'nin
+# istek zaman aşımına uğrayıp kullanıcıya "502 Bad Gateway" döndürmesine
+# sebep oluyordu (sunucu aslında çalışmaya devam ediyor olsa bile). Bu
+# yüzden ağır işler artık arka plan thread'lerinde çalışıyor: HTTP isteği
+# ANINDA bir "log_id" ile döner, gerçek iş arka planda devam eder, kullanıcı
+# arayüzü bu id'yi periyodik olarak sorgulayarak (polling) ilerlemeyi gösterir.
+# ---------------------------------------------------------------------------
+from app.database import engine  # noqa: E402  (döngüsel import'u önlemek için burada)
+
+
+def create_running_log(
+    snort_version: Optional[str],
+    source_used: str,
+    file_name: Optional[str] = None,
+    is_manual_upload: bool = False,
+) -> int:
+    """Bir SyncLog kaydını HEMEN 'running' durumunda oluşturup id'sini döner.
+    Asıl iş bu id kullanılarak arka planda güncellenir."""
+    with Session(engine) as session:
+        log = SyncLog(
+            status="running",
+            snort_version=snort_version,
+            source_used=source_used,
+            file_name=file_name,
+            is_manual_upload=is_manual_upload,
+        )
+        session.add(log)
+        session.commit()
+        session.refresh(log)
+        return log.id
+
+
+def run_source_sync_background(log_id: int, source_key: str):
+    """Tek bir kaynağı arka planda senkronize edip aynı log satırını günceller."""
+    with Session(engine) as session:
+        log = session.get(SyncLog, log_id)
+        if not log:
+            logger.error("Arka plan görevi: log_id %s bulunamadı", log_id)
+            return
+        try:
+            sync_source(session, source_key, existing_log=log)
+        except Exception as e:
+            logger.exception("Arka plan senkronizasyonu başarısız: %s", source_key)
+            log.status = "failed"
+            log.error = str(e)
+            log.finished_at = datetime.utcnow()
+            session.add(log)
+            session.commit()
+
+
+def run_all_sync_background(log_ids_by_key: dict):
+    """Tüm canlı kaynakları sırayla, her biri için önceden oluşturulmuş log
+    id'lerini güncelleyerek arka planda senkronize eder."""
+    with Session(engine) as session:
+        for source_key, log_id in log_ids_by_key.items():
+            log = session.get(SyncLog, log_id)
+            if not log:
+                continue
+            try:
+                sync_source(session, source_key, existing_log=log)
+            except Exception as e:
+                logger.exception("Arka plan senkronizasyonu başarısız: %s", source_key)
+                log.status = "failed"
+                log.error = str(e)
+                log.finished_at = datetime.utcnow()
+                session.add(log)
+                session.commit()
+
+
+def run_upload_background(log_id: int, file_name: str, content: bytes, snort_version: str):
+    """Yüklenen dosyayı arka planda işleyip aynı log satırını günceller."""
+    with Session(engine) as session:
+        log = session.get(SyncLog, log_id)
+        if not log:
+            logger.error("Arka plan görevi: log_id %s bulunamadı", log_id)
+            return
+        try:
+            lines = _iter_rule_lines_from_archive(content)
+            ingested, skipped = _ingest_lines(
+                session,
+                lines,
+                snort_version=snort_version,
+                ruleset_source=f"manual-upload:{file_name}",
+                source_file=file_name,
+            )
+            if ingested == 0:
+                raise RuntimeError(
+                    "Dosyadan hiçbir geçerli Snort kuralı (sid içeren satır) çıkarılamadı."
+                )
+            log.status = "success"
+            log.rules_ingested = ingested
+            log.rules_skipped = skipped
+        except Exception as e:
+            logger.exception("Arka plan dosya yükleme başarısız: %s", file_name)
+            log.status = "failed"
+            log.error = str(e)
+        finally:
+            log.finished_at = datetime.utcnow()
+            session.add(log)
+            session.commit()
 
 
 def ingest_uploaded_file(

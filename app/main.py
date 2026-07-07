@@ -4,7 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
@@ -16,9 +16,11 @@ from app.models import SnortRule, SyncLog
 from app.config import SYNC_INTERVAL_HOURS, RULESET_SOURCES, SUPPORTED_VERSIONS
 from app.rule_sync import (
     sync_offline_sample,
-    sync_source,
     sync_all_live_sources,
-    ingest_uploaded_file,
+    create_running_log,
+    run_source_sync_background,
+    run_all_sync_background,
+    run_upload_background,
 )
 from app.snort_parser import parse_rule
 from app.http_generator import generate_http_request
@@ -126,31 +128,67 @@ def list_sources():
 
 # ---------------------------------------------------------------------------
 # Senkronizasyon
+#
+# ÖNEMLİ: Canlı kaynak senkronizasyonu (özellikle "tüm sürümler") dakikalarca
+# sürebildiği için ARTIK ARKA PLANDA çalışıyor. Endpoint anında bir log_id
+# ile döner; ilerleme /api/sync/log/{id} üzerinden sorgulanır (polling).
+# Bu, Render gibi platformlarda uzun isteklerin "502 Bad Gateway" ile
+# zaman aşımına uğramasını engeller.
 # ---------------------------------------------------------------------------
 @app.post("/api/sync/offline-sample")
 def trigger_offline_sync(session: Session = Depends(get_session)):
+    # Offline demo veri seti küçük olduğu için senkron kalabilir (hızlı biter).
     log = sync_offline_sample(session)
     return _log_to_dict(log)
 
 
 @app.post("/api/sync/source/{source_key}")
-def trigger_source_sync(source_key: str, session: Session = Depends(get_session)):
-    try:
-        log = sync_source(session, source_key)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    return _log_to_dict(log)
+def trigger_source_sync(source_key: str, background_tasks: BackgroundTasks):
+    spec = next((s for s in RULESET_SOURCES if s["key"] == source_key), None)
+    if not spec:
+        raise HTTPException(status_code=404, detail=f"Bilinmeyen kaynak: {source_key}")
+
+    log_id = create_running_log(snort_version=spec["snort_version"], source_used=spec["label"])
+    background_tasks.add_task(run_source_sync_background, log_id, source_key)
+    return {
+        "status": "started",
+        "log_id": log_id,
+        "message": f"'{spec['label']}' arka planda senkronize ediliyor. İlerleme için /api/sync/log/{log_id} sorgulanabilir.",
+    }
 
 
 @app.post("/api/sync/all")
-def trigger_sync_all(session: Session = Depends(get_session)):
-    """url tanımlı olan tüm sürümleri (Snort 3.x + 2.9 community + ET Open) tek seferde senkronize eder."""
-    logs = sync_all_live_sources(session)
-    return [_log_to_dict(l) for l in logs]
+def trigger_sync_all(background_tasks: BackgroundTasks):
+    """url tanımlı olan tüm sürümleri (Snort 3.x + 2.9 community + ET Open)
+    ARKA PLANDA, sırayla senkronize eder. Anında log_id listesi döner."""
+    live_sources = [s for s in RULESET_SOURCES if s["url"]]
+    log_ids_by_key = {}
+    for spec in live_sources:
+        log_ids_by_key[spec["key"]] = create_running_log(
+            snort_version=spec["snort_version"], source_used=spec["label"]
+        )
+    background_tasks.add_task(run_all_sync_background, log_ids_by_key)
+    return {
+        "status": "started",
+        "log_ids": list(log_ids_by_key.values()),
+        "message": f"{len(live_sources)} kaynak arka planda sırayla senkronize ediliyor.",
+    }
+
+
+@app.get("/api/sync/log/{log_id}")
+def get_sync_log(log_id: int, session: Session = Depends(get_session)):
+    """Arka planda başlatılan bir senkronizasyon/yükleme işleminin GÜNCEL
+    durumunu döner. Frontend bunu birkaç saniyede bir sorgulayarak
+    (polling) ilerlemeyi kullanıcıya gösterir."""
+    log = session.get(SyncLog, log_id)
+    if not log:
+        raise HTTPException(status_code=404, detail=f"log_id {log_id} bulunamadı.")
+    return _log_to_dict(log)
 
 
 def _log_to_dict(log: SyncLog) -> dict:
     return {
+        "id": log.id,
         "status": log.status,
         "rules_ingested": log.rules_ingested,
         "rules_skipped": log.rules_skipped,
@@ -169,13 +207,13 @@ def sync_history(session: Session = Depends(get_session)):
 
 
 # ---------------------------------------------------------------------------
-# Manuel dosya yükleme
+# Manuel dosya yükleme (büyük dosyalar için de arka planda işlenir)
 # ---------------------------------------------------------------------------
 @app.post("/api/upload-rules")
 async def upload_rules(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     snort_version: str = Form(...),
-    session: Session = Depends(get_session),
 ):
     if snort_version not in SUPPORTED_VERSIONS:
         raise HTTPException(
@@ -186,10 +224,18 @@ async def upload_rules(
     if not content:
         raise HTTPException(status_code=400, detail="Dosya boş.")
 
-    log = ingest_uploaded_file(session, file.filename, content, snort_version)
-    if log.status != "success":
-        raise HTTPException(status_code=400, detail=log.error or "Yükleme başarısız.")
-    return _log_to_dict(log)
+    log_id = create_running_log(
+        snort_version=snort_version,
+        source_used="manual-upload",
+        file_name=file.filename,
+        is_manual_upload=True,
+    )
+    background_tasks.add_task(run_upload_background, log_id, file.filename, content, snort_version)
+    return {
+        "status": "started",
+        "log_id": log_id,
+        "message": f"'{file.filename}' arka planda işleniyor. İlerleme için /api/sync/log/{log_id} sorgulanabilir.",
+    }
 
 
 # ---------------------------------------------------------------------------

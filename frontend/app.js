@@ -300,6 +300,40 @@ document.getElementById("downloadPcapBtn").addEventListener("click", () => {
 // ---------------------------------------------------------------------------
 // Senkronizasyon eylemleri
 // ---------------------------------------------------------------------------
+function pollSyncLog(logId, onDone) {
+  const interval = setInterval(async () => {
+    try {
+      const log = await apiGet(`/api/sync/log/${logId}`);
+      if (log.status === "running") return;
+      clearInterval(interval);
+      onDone(log);
+    } catch (e) {
+      clearInterval(interval);
+      onDone({ status: "failed", error: e.message });
+    }
+  }, 2000);
+}
+
+function pollMultipleSyncLogs(logIds, onAllDone) {
+  const results = {};
+  const interval = setInterval(async () => {
+    try {
+      const logs = await Promise.all(logIds.map((id) => apiGet(`/api/sync/log/${id}`)));
+      logs.forEach((l, i) => (results[logIds[i]] = l));
+      const stillRunning = logs.some((l) => l.status === "running");
+      const doneCount = logs.filter((l) => l.status !== "running").length;
+      setState(`Senkronizasyon devam ediyor... (${doneCount}/${logIds.length} kaynak tamamlandı)`);
+      if (!stillRunning) {
+        clearInterval(interval);
+        onAllDone(Object.values(results));
+      }
+    } catch (e) {
+      clearInterval(interval);
+      onAllDone(Object.values(results));
+    }
+  }, 2000);
+}
+
 async function doOfflineSync() {
   resetPipeline();
   setState("Offline demo veri seti (3.x + 2.9) yükleniyor...");
@@ -314,17 +348,21 @@ async function doOfflineSync() {
 
 async function doSyncAll() {
   resetPipeline();
-  setState("Tüm canlı kaynaklar (3.x, 2.9 community, ET Open) sırayla senkronize ediliyor...");
+  setState("Tüm canlı kaynaklar (3.x, 2.9 community, ET Open) arka planda senkronize ediliyor, bu birkaç dakika sürebilir...");
   try {
-    const results = await apiPost("/api/sync/all");
-    const okCount = results.filter((r) => r.status === "success").length;
-    const totalRules = results.reduce((sum, r) => sum + (r.rules_ingested || 0), 0);
-    const totalSkipped = results.reduce((sum, r) => sum + (r.rules_skipped || 0), 0);
-    setState(
-      `${okCount}/${results.length} kaynak başarıyla senkronize edildi, toplam ${totalRules} kural eklendi` +
-        (totalSkipped ? `, ${totalSkipped} satır atlandı.` : ".")
-    );
-    await loadStatus();
+    const r = await apiPost("/api/sync/all");
+    pollMultipleSyncLogs(r.log_ids, (logs) => {
+      const okCount = logs.filter((l) => l.status === "success").length;
+      const totalRules = logs.reduce((sum, l) => sum + (l.rules_ingested || 0), 0);
+      const totalSkipped = logs.reduce((sum, l) => sum + (l.rules_skipped || 0), 0);
+      const errors = logs.filter((l) => l.status === "failed").map((l) => l.error).filter(Boolean);
+      setState(
+        `${okCount}/${logs.length} kaynak başarıyla senkronize edildi, toplam ${totalRules} kural eklendi` +
+          (totalSkipped ? `, ${totalSkipped} satır atlandı.` : ".") +
+          (errors.length ? ` Hatalar: ${errors.join(" | ")}` : "")
+      );
+      loadStatus();
+    });
   } catch (e) {
     setState("Hata: " + e.message, true);
   }
@@ -333,18 +371,20 @@ async function doSyncAll() {
 async function doSyncOne() {
   const key = els.syncSourceSelect.value;
   resetPipeline();
-  setState(`'${key}' kaynağı senkronize ediliyor...`);
+  setState(`'${key}' kaynağı arka planda senkronize ediliyor...`);
   try {
     const r = await apiPost(`/api/sync/source/${key}`);
-    if (r.status === "success") {
-      setState(
-        `Senkronizasyon tamam: ${r.rules_ingested} kural (sürüm ${r.snort_version}).` +
-          (r.rules_skipped ? ` ${r.rules_skipped} satır atlandı.` : "")
-      );
-    } else {
-      setState(`Senkronizasyon başarısız: ${r.error}`, true);
-    }
-    await loadStatus();
+    pollSyncLog(r.log_id, (log) => {
+      if (log.status === "success") {
+        setState(
+          `Senkronizasyon tamam: ${log.rules_ingested} kural (sürüm ${log.snort_version}).` +
+            (log.rules_skipped ? ` ${log.rules_skipped} satır atlandı.` : "")
+        );
+      } else {
+        setState(`Senkronizasyon başarısız: ${log.error}`, true);
+      }
+      loadStatus();
+    });
   } catch (e) {
     setState("Hata: " + e.message, true);
   }
@@ -358,17 +398,24 @@ async function doUpload() {
     return;
   }
   resetPipeline();
-  setState(`'${file.name}' yükleniyor ve veritabanına işleniyor...`);
+  setState(`'${file.name}' yükleniyor...`);
   try {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("snort_version", version);
     const r = await apiPost("/api/upload-rules", { body: formData });
-    setState(
-      `Dosya yüklendi: ${r.rules_ingested} kural eklendi/güncellendi (sürüm ${r.snort_version}).` +
-        (r.rules_skipped ? ` ${r.rules_skipped} satır atlandı.` : "")
-    );
-    await loadStatus();
+    setState(`'${file.name}' arka planda işleniyor...`);
+    pollSyncLog(r.log_id, (log) => {
+      if (log.status === "success") {
+        setState(
+          `Dosya işlendi: ${log.rules_ingested} kural eklendi/güncellendi (sürüm ${log.snort_version}).` +
+            (log.rules_skipped ? ` ${log.rules_skipped} satır atlandı.` : "")
+        );
+      } else {
+        setState(`Dosya işlenemedi: ${log.error}`, true);
+      }
+      loadStatus();
+    });
   } catch (e) {
     setState("Hata: " + e.message, true);
   }
