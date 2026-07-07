@@ -65,23 +65,27 @@ window.filterToVersion = function (version) {
 };
 
 async function loadRules() {
-  const version = currentVersion;
-  const offset = currentPage * PAGE_SIZE;
+  try {
+    const version = currentVersion;
+    const offset = currentPage * PAGE_SIZE;
 
-  if (!version) {
-    const rules = await apiGet(`/api/rules?limit=${PAGE_SIZE}`);
-    renderRows(rules.map((r) => ({ sid: r.sid, rev: r.rev, msg: r.msg, classtype: r.classtype, snort_version: r.snort_version })));
-    document.getElementById("listCountTag").textContent = `${rules.length} kural gösteriliyor (tam sayfalama için bir sürüm seçin)`;
-    document.getElementById("pageInfo").textContent = "";
-    return;
+    if (!version) {
+      const rules = await apiGet(`/api/rules?limit=${PAGE_SIZE}`);
+      renderRows(rules.map((r) => ({ sid: r.sid, rev: r.rev, msg: r.msg, classtype: r.classtype, snort_version: r.snort_version })));
+      document.getElementById("listCountTag").textContent = `${rules.length} kural gösteriliyor (tam sayfalama için bir sürüm seçin)`;
+      document.getElementById("pageInfo").textContent = "";
+      return;
+    }
+
+    const qs = new URLSearchParams({ snort_version: version, limit: PAGE_SIZE, offset });
+    if (currentQuery) qs.set("q", currentQuery);
+    const data = await apiGet(`/api/stats/rules?${qs.toString()}`);
+    renderRows(data.items.map((r) => ({ ...r, snort_version: version })));
+    document.getElementById("listCountTag").textContent = `${data.total} kuraldan ${offset + 1}-${Math.min(offset + PAGE_SIZE, data.total)} arası gösteriliyor`;
+    document.getElementById("pageInfo").textContent = `Sayfa ${currentPage + 1} / ${Math.max(1, Math.ceil(data.total / PAGE_SIZE))}`;
+  } catch (e) {
+    showPageError("Kural listesi yüklenemedi: " + e.message);
   }
-
-  const qs = new URLSearchParams({ snort_version: version, limit: PAGE_SIZE, offset });
-  if (currentQuery) qs.set("q", currentQuery);
-  const data = await apiGet(`/api/stats/rules?${qs.toString()}`);
-  renderRows(data.items.map((r) => ({ ...r, snort_version: version })));
-  document.getElementById("listCountTag").textContent = `${data.total} kuraldan ${offset + 1}-${Math.min(offset + PAGE_SIZE, data.total)} arası gösteriliyor`;
-  document.getElementById("pageInfo").textContent = `Sayfa ${currentPage + 1} / ${Math.max(1, Math.ceil(data.total / PAGE_SIZE))}`;
 }
 
 function renderRows(rows) {
@@ -126,5 +130,18 @@ document.getElementById("nextPage").addEventListener("click", () => {
   loadRules();
 });
 
-loadSummary();
-loadRules();
+function showPageError(msg) {
+  let el = document.getElementById("pageError");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "pageError";
+    el.className = "notice";
+    el.style.marginBottom = "16px";
+    el.style.borderLeftColor = "var(--red)";
+    document.querySelector(".stats-wrap").insertBefore(el, document.getElementById("summaryCards"));
+  }
+  el.innerHTML = "⚠️ " + escapeHtml(msg);
+}
+
+loadSummary().catch((e) => showPageError("İstatistikler yüklenemedi: " + e.message));
+loadRules().catch((e) => showPageError("Kural listesi yüklenemedi: " + e.message));

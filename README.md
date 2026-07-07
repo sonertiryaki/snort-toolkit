@@ -65,6 +65,19 @@ bir dosya seçip hedef Snort sürümünü belirleyip yükleyebilirsiniz. Sistem
 formatı otomatik algılar (tar arşivi / düz gzip / düz metin) ve içindeki
 her `sid:` içeren satırı ayrıştırıp veritabanına ekler/günceller.
 
+## Değişiklik notu: scapy kaldırıldı (HTTP 500 düzeltmesi)
+
+Önceki sürüm PCAP üretimi için `scapy` kütüphanesini kullanıyordu. Scapy,
+Render gibi minimal/kısıtlı konteyner ortamlarında ağ arayüzü algılama
+sırasında beklenmedik exception fırlatabiliyor ve bu da `/api/rule/{sid}/test`
+uç noktasında opak bir **HTTP 500** hatasına yol açıyordu. Bu sürümde PCAP
+üretimi tamamen `app/pcap_writer.py` içinde, harici bağımlılık olmadan
+(sadece Python'ın `struct`/`socket` modülleriyle) yeniden yazıldı — geçerli
+Ethernet/IPv4/TCP checksum'larına sahip, standart `.pcap` formatına %100
+uyumlu dosyalar üretir. Ayrıca artık herhangi bir sunucu hatası, boş "HTTP
+500" yerine gerçek hata mesajını (`Sunucu hatası: ...`) doğrudan arayüzde
+gösterir.
+
 ## API uç noktaları
 
 | Method | Path | Açıklama |

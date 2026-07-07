@@ -72,8 +72,16 @@ def _ingest_lines(
     """Verilen kural satırlarını parse edip (sid, snort_version) bazında upsert eder.
 
     Döner: (başarıyla işlenen kural sayısı, atlanan/hatalı satır sayısı).
-    Tek bir bozuk satır (ör. byte_extract değişkeni, bilinmeyen sözdizimi)
-    tüm senkronizasyonu ÇÖKERTMEZ — sadece o satır atlanır.
+
+    ÖNEMLİ DÜZELTME: Her satır KENDİ transaction'ında commit edilir ve
+    hata durumunda rollback yapılır. Önceki sürümde tek bir commit tüm
+    döngünün sonunda yapılıyordu; bu yüzden döngü ortasında oluşan TEK bir
+    DB hatası (ör. aynı dosya içinde tekrarlanan bir SID, ya da başka bir
+    bütünlük hatası) session'ın transaction'ını 'zehirliyor' ve o
+    noktadan sonraki HER satır farklı ve anlamsız hatalarla
+    (ör. 'PendingRollbackError') başarısız oluyordu. Bu da 'her seferinde
+    başka bir hata alıyorum' ve 'senkronizasyon sadece birkaç kural
+    getiriyor' şikayetlerinin gerçek sebebiydi.
     """
     ingested = 0
     skipped = 0
@@ -142,13 +150,14 @@ def _ingest_lines(
                         source_file=source_file,
                     )
                 )
+            session.commit()  # <-- Her satır kendi transaction'ında bitiyor
             ingested += 1
         except Exception:
             logger.warning("SID %s işlenemedi, atlandı.", getattr(parsed, "sid", "?"))
+            session.rollback()  # <-- Session'ı bir sonraki satır için temiz bırak
             skipped += 1
             continue
 
-    session.commit()
     return ingested, skipped
 
 

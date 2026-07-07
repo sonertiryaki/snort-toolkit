@@ -126,8 +126,21 @@ async function loadStatus() {
           .map((v) => `<div class="vb-pill">Snort <b>${escapeHtml(v.snort_version)}</b> → ${v.count} kural</div>`)
           .join("")
       : `<span style="color:var(--text-low);font-size:13px;">Henüz kural yok — önce bir senkronizasyon/yükleme yapın.</span>`;
+
+    if (s.database_persistence_warning) {
+      let warnEl = document.getElementById("dbPersistWarning");
+      if (!warnEl) {
+        warnEl = document.createElement("div");
+        warnEl.id = "dbPersistWarning";
+        warnEl.className = "notice";
+        warnEl.style.marginBottom = "14px";
+        els.stateMsg.parentNode.insertBefore(warnEl, els.stateMsg);
+      }
+      warnEl.innerHTML = `⚠️ <b>Veritabanı: SQLite (kalıcı değil).</b> ${escapeHtml(s.database_persistence_warning)}`;
+    }
   } catch (e) {
     console.error("Durum bilgisi yüklenemedi", e);
+    setState("Durum bilgisi yüklenemedi: " + e.message, true);
   }
 }
 
@@ -219,22 +232,33 @@ function renderPan(pan) {
   document.getElementById("panXml").textContent = pan.xml;
   document.getElementById("panCli").textContent = pan.cli_commands.join("\n");
   const warnEl = document.getElementById("panWarnings");
+  const confBadge =
+    pan.conversion_confidence === "low"
+      ? `<span class="badge bad" style="margin-bottom:10px;display:inline-block;">⚠️ DÜŞÜK GÜVEN: Bu dönüşüm manuel doğrulama gerektirir</span><br>`
+      : pan.conversion_confidence === "medium"
+      ? `<span class="badge warn" style="margin-bottom:10px;display:inline-block;">⚠️ ORTA GÜVEN: Gözden geçirilmesi önerilir</span><br>`
+      : `<span class="badge ok" style="margin-bottom:10px;display:inline-block;">✔ YÜKSEK GÜVEN</span><br>`;
   if (pan.warnings && pan.warnings.length) {
-    warnEl.innerHTML = "⚠️ " + pan.warnings.map(escapeHtml).join("<br>⚠️ ");
+    warnEl.innerHTML = confBadge + "⚠️ " + pan.warnings.map(escapeHtml).join("<br><br>⚠️ ");
     warnEl.style.display = "block";
   } else {
-    warnEl.style.display = "none";
+    warnEl.innerHTML = confBadge;
+    warnEl.style.display = "block";
   }
 }
 
 function renderTest(test) {
-  lastPcapBase64 = test.pcap_base64;
+  lastPcapBase64 = test.pcap_base64 || null;
 
   const summaryEl = document.getElementById("testSummaryBadge");
   let badgeClass = "ok";
   if (test.false_positive_rate > 0) badgeClass = "warn";
   if (!test.true_positive.matched) badgeClass = "bad";
-  summaryEl.innerHTML = `<span class="badge ${badgeClass}">${escapeHtml(test.summary)}</span>`;
+  let summaryHtml = `<span class="badge ${badgeClass}">${escapeHtml(test.summary)}</span>`;
+  if (test.pcap_warning) {
+    summaryHtml += `<div class="notice" style="margin-top:10px;">⚠️ ${escapeHtml(test.pcap_warning)}</div>`;
+  }
+  summaryEl.innerHTML = summaryHtml;
 
   const tpEl = document.getElementById("tpValue");
   tpEl.textContent = test.true_positive.matched ? "ALARM ✔" : "ALARM YOK ✘";
@@ -255,6 +279,10 @@ function renderTest(test) {
       </div>`
     )
     .join("");
+
+  const downloadBtn = document.getElementById("downloadPcapBtn");
+  downloadBtn.disabled = !lastPcapBase64;
+  downloadBtn.textContent = lastPcapBase64 ? "PCAP indir" : "PCAP üretilemedi (bkz. yukarıdaki uyarı)";
 }
 
 document.getElementById("downloadPcapBtn").addEventListener("click", () => {

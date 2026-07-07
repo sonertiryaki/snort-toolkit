@@ -77,6 +77,31 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def no_cache_middleware(request, call_next):
+    """Tarayıcının frontend dosyalarını (app.js, styles.css, stats.html vb.)
+    eski haliyle önbellekte tutup güncellemelerin görünmemesine sebep
+    olmasını engeller. Bu araç düşük trafikli bir iç araç olduğu için
+    performans kaybı önemsizdir, güncelliğin garanti olması daha önemlidir."""
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    return response
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request, exc: Exception):
+    """Beklenmeyen HERHANGİ bir sunucu hatasını, boş/opak 'HTTP 500' yerine
+    okunabilir bir JSON mesajına çevirir. Tam traceback sunucu loglarına
+    yazılır (Render/Oracle'da 'Logs' sekmesinden görülebilir); kullanıcıya
+    ise özet ve güvenli bir mesaj döner."""
+    logger.exception("Beklenmeyen hata: %s %s", request.method, request.url.path)
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Sunucu hatası: {type(exc).__name__}: {exc}"},
+    )
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
@@ -172,6 +197,8 @@ async def upload_rules(
 # ---------------------------------------------------------------------------
 @app.get("/api/status")
 def get_status(session: Session = Depends(get_session)):
+    from app.config import DATABASE_URL
+
     total_rules = session.exec(select(func.count()).select_from(SnortRule)).one()
 
     by_version = {}
@@ -209,6 +236,15 @@ def get_status(session: Session = Depends(get_session)):
 
     return {
         "total_rules": total_rules,
+        "database_backend": "postgresql" if DATABASE_URL.startswith("postgres") else "sqlite",
+        "database_persistence_warning": (
+            None
+            if DATABASE_URL.startswith("postgres")
+            else "SQLite kullanılıyor. Render'ın ücretsiz planında bu, container her yeniden "
+            "başladığında (uyku/deploy) verilerin sıfırlanabileceği anlamına gelir. Kalıcı "
+            "veri için DATABASE_URL ortam değişkenine ücretsiz bir Postgres (ör. neon.tech) "
+            "bağlantı adresi tanımlamanız önerilir."
+        ),
         "rules_by_version": by_version,
         "versions": [
             {"snort_version": v, "count": c} for v, c in sorted(by_version.items(), key=lambda kv: -kv[1])
@@ -250,15 +286,17 @@ def get_stats_rules(
     """İstatistik sayfası için: tek bir sürümün TÜM kurallarını (arama filtreli,
     sayfalanabilir) döner. Toplam sayıyı da içerir ki '123 / 4200 gösteriliyor'
     gibi okunabilir bir bilgi verilebilsin."""
-    base_query = select(SnortRule).where(SnortRule.snort_version == snort_version)
+    conditions = [SnortRule.snort_version == snort_version]
     if q:
         like = f"%{q}%"
-        base_query = base_query.where(
-            (SnortRule.msg.ilike(like)) | (cast(SnortRule.sid, String).ilike(like))
-        )
+        conditions.append((SnortRule.msg.ilike(like)) | (cast(SnortRule.sid, String).ilike(like)))
 
-    total = session.exec(select(func.count()).select_from(base_query.subquery())).one()
-    items = session.exec(base_query.offset(offset).limit(limit)).all()
+    total = session.exec(
+        select(func.count()).select_from(SnortRule).where(*conditions)
+    ).one()
+    items = session.exec(
+        select(SnortRule).where(*conditions).offset(offset).limit(limit)
+    ).all()
 
     return {
         "snort_version": snort_version,
@@ -350,6 +388,7 @@ def get_paloalto(sid: int, snort_version: Optional[str] = None, session: Session
         "xml": result.xml,
         "cli_commands": result.cli_commands,
         "warnings": result.warnings,
+        "conversion_confidence": result.conversion_confidence,
     }
 
 
@@ -382,7 +421,8 @@ def get_test_report(sid: int, snort_version: Optional[str] = None, session: Sess
             }
             for r in report.false_positive_checks
         ],
-        "pcap_base64": base64.b64encode(report.pcap_bytes).decode("ascii"),
+        "pcap_base64": base64.b64encode(report.pcap_bytes).decode("ascii") if report.pcap_bytes else None,
+        "pcap_warning": report.pcap_warning,
     }
 
 
