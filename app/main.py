@@ -187,11 +187,18 @@ def get_sync_log(log_id: int, session: Session = Depends(get_session)):
 
 
 def _log_to_dict(log: SyncLog) -> dict:
+    skipped_samples = []
+    if log.skipped_samples:
+        try:
+            skipped_samples = json.loads(log.skipped_samples)
+        except Exception:
+            skipped_samples = []
     return {
         "id": log.id,
         "status": log.status,
         "rules_ingested": log.rules_ingested,
         "rules_skipped": log.rules_skipped,
+        "skipped_samples": skipped_samples,
         "source_used": log.source_used,
         "snort_version": log.snort_version,
         "file_name": log.file_name,
@@ -379,9 +386,20 @@ def _get_rule_or_404(sid: int, session: Session, snort_version: Optional[str] = 
             select(SnortRule).where(SnortRule.sid == sid, SnortRule.snort_version == snort_version)
         ).first()
         if not rule:
+            # Başka sürümlerde var mı diye bakıp kullanıcıya daha faydalı bir ipucu ver
+            other_versions = session.exec(select(SnortRule.snort_version).where(SnortRule.sid == sid)).all()
+            if other_versions:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        f"SID {sid} için '{snort_version}' sürümünde kayıt yok, ANCAK şu "
+                        f"sürüm(ler)de mevcut: {', '.join(sorted(set(other_versions)))}. "
+                        f"Yukarıdaki sürüm seçiciyi değiştirip tekrar deneyin."
+                    ),
+                )
             raise HTTPException(
                 status_code=404,
-                detail=f"SID {sid} için '{snort_version}' sürümünde kayıt bulunamadı.",
+                detail=f"SID {sid} veritabanında hiçbir sürümde bulunamadı. Senkronizasyon/yükleme yapıldığından ve bu SID'in gerçekten o dosyada olduğundan emin olun.",
             )
         return rule
 

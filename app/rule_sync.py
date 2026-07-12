@@ -3,6 +3,7 @@ import gzip
 import json
 import logging
 import tarfile
+import zipfile
 from datetime import datetime
 from typing import Iterable, Optional
 
@@ -10,12 +11,28 @@ import httpx
 from sqlmodel import Session, select
 
 from app.config import RULESET_SOURCES, DATA_DIR
+from app.database import engine
 from app.models import SnortRule, SyncLog
 from app.snort_parser import parse_rule
 
 logger = logging.getLogger("rule_sync")
 
 LOCAL_SAMPLE_RULES_PATH = "app/sample_rules.rules"
+
+# Bir batch'te kaç satır işlensin sonra tek commit yapılsın. Önceki sürümde
+# HER satır kendi commit'inde bitiyordu; bu, güvenli ama binlerce satırlık
+# gerçek ruleset'lerde (ör. Emerging Threats Open, onbinlerce kural) DAKİKALAR
+# sürebiliyordu ve bu da Render gibi platformlarda arka plan görevinin
+# tamamlanmadan servisin uykuya geçmesine (ve senkronizasyonun yarıda
+# kesilmesine) sebep oluyordu. Şimdi her satır KENDİ SAVEPOINT'inde izole
+# ediliyor (bir satır hatası diğerlerini etkilemiyor) ama gerçek commit
+# sadece her BATCH_SIZE satırda bir yapılıyor -> onlarca kat daha hızlı.
+BATCH_SIZE = 200
+
+# Atlanan satırlardan kaç tanesinin örneğini (sebebiyle birlikte) saklayıp
+# kullanıcıya gösterelim. Kullanıcı "benim aradığım kural neden atlandı"
+# sorusunu böylece kendi başına teşhis edebilir.
+MAX_SKIPPED_SAMPLES = 25
 
 
 def _download(url: str) -> bytes:
@@ -26,9 +43,29 @@ def _download(url: str) -> bytes:
 
 
 def _iter_rule_lines_from_archive(content: bytes) -> Iterable[str]:
-    """tar.gz, düz .gz ya da düz metin .rules içeriğini otomatik algılayıp
-    satır satır kural metnini döndürür."""
-    # 1) tar.gz dene (snort3/snort2.9 community ruleset'leri bu formattadır)
+    """.zip, tar.gz, düz .gz ya da düz metin .rules içeriğini otomatik
+    algılayıp satır satır kural metnini döndürür.
+
+    ÖNEMLİ DÜZELTME: Önceki sürüm .zip formatını HİÇ desteklemiyordu. Bir
+    .zip dosyası yüklendiğinde önce tar olarak açma, sonra düz gzip olarak
+    açma denemeleri başarısız oluyor, kod sessizce ham ZIP binary verisini
+    'düz metin' sanıp UTF-8'e (hatalı baytları değiştirerek) çevirmeye
+    çalışıyordu. Bu durumda hem sonuçlar öngörülemez oluyor (bazı rastgele
+    baytlar tesadüfen bir kural gibi ayrıştırılabiliyor) hem de gerçek
+    kurallar hiç bulunamıyordu. Şimdi .zip formatı da tıpkı tar.gz gibi
+    düzgün şekilde ayrıştırılıyor.
+    """
+    # 1) ZIP dene (ör. GitHub "Download ZIP", snortrules-snapshot-*.zip)
+    if zipfile.is_zipfile(io.BytesIO(content)):
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            for name in zf.namelist():
+                if name.endswith(".rules"):
+                    with zf.open(name) as f:
+                        for line in f.read().decode("utf-8", errors="replace").splitlines():
+                            yield line
+            return
+
+    # 2) tar.gz dene (snort3/snort2.9 community ruleset'leri bu formattadır)
     try:
         with tarfile.open(fileobj=io.BytesIO(content)) as tar:
             for member in tar.getmembers():
@@ -42,7 +79,7 @@ def _iter_rule_lines_from_archive(content: bytes) -> Iterable[str]:
     except tarfile.ReadError:
         pass
 
-    # 2) düz .gz dene (bazı eski/alternatif dağıtımlar tek dosya gzip olabilir)
+    # 3) düz .gz dene (bazı eski/alternatif dağıtımlar tek dosya gzip olabilir)
     try:
         decompressed = gzip.decompress(content)
         for line in decompressed.decode("utf-8", errors="replace").splitlines():
@@ -51,7 +88,7 @@ def _iter_rule_lines_from_archive(content: bytes) -> Iterable[str]:
     except OSError:
         pass
 
-    # 3) hiçbiri değilse düz metin (.rules / .txt) olduğunu varsay
+    # 4) hiçbiri değilse düz metin (.rules / .txt) olduğunu varsay
     for line in content.decode("utf-8", errors="replace").splitlines():
         yield line
 
@@ -68,97 +105,108 @@ def _ingest_lines(
     snort_version: str,
     ruleset_source: str,
     source_file: Optional[str] = None,
-) -> "tuple[int, int]":
+) -> "tuple[int, int, list]":
     """Verilen kural satırlarını parse edip (sid, snort_version) bazında upsert eder.
 
-    Döner: (başarıyla işlenen kural sayısı, atlanan/hatalı satır sayısı).
+    Döner: (başarıyla işlenen kural sayısı, atlanan/hatalı satır sayısı,
+    atlanan satırlardan örnekler [{'line':..., 'reason':...}]).
 
-    ÖNEMLİ DÜZELTME: Her satır KENDİ transaction'ında commit edilir ve
-    hata durumunda rollback yapılır. Önceki sürümde tek bir commit tüm
-    döngünün sonunda yapılıyordu; bu yüzden döngü ortasında oluşan TEK bir
-    DB hatası (ör. aynı dosya içinde tekrarlanan bir SID, ya da başka bir
-    bütünlük hatası) session'ın transaction'ını 'zehirliyor' ve o
-    noktadan sonraki HER satır farklı ve anlamsız hatalarla
-    (ör. 'PendingRollbackError') başarısız oluyordu. Bu da 'her seferinde
-    başka bir hata alıyorum' ve 'senkronizasyon sadece birkaç kural
-    getiriyor' şikayetlerinin gerçek sebebiydi.
+    PERFORMANS DÜZELTMESİ: Her satır kendi SAVEPOINT'inde (nested
+    transaction) izole edilir — bir satırdaki hata diğerlerini etkilemez,
+    tıpkı önceki 'her satır kendi commit'i' yaklaşımı gibi güvenlidir.
+    FARK: gerçek disk commit'i sadece her BATCH_SIZE satırda bir yapılır.
+    Bu, binlerce/onbinlerce satırlık gerçek ruleset'lerde (ör. Emerging
+    Threats Open) senkronizasyonu onlarca kat hızlandırır ve Render gibi
+    platformlarda 'işlem çok uzun sürdüğü için arka plan görevi yarıda
+    kesiliyor' sorununu doğrudan azaltır.
     """
     ingested = 0
     skipped = 0
+    skipped_samples = []
+
+    def _record_skip(raw_line: str, reason: str):
+        nonlocal skipped
+        skipped += 1
+        if len(skipped_samples) < MAX_SKIPPED_SAMPLES:
+            skipped_samples.append({"line": raw_line.strip()[:200], "reason": reason})
+
     for raw_line in lines:
         try:
             parsed = parse_rule(raw_line)
             if not parsed or not parsed.sid:
                 continue
-        except Exception:
+        except Exception as e:
             logger.warning("Ayrıştırılamayan satır atlandı: %s", raw_line[:120])
-            skipped += 1
+            _record_skip(raw_line, f"parse hatası: {e}")
             continue
 
         try:
-            options_dump = {
-                "contents": [
-                    {
-                        "pattern_raw": c.pattern_raw,
-                        "nocase": c.nocase,
-                        "http_buffer": c.http_buffer,
-                        "negated": c.negated,
-                    }
-                    for c in parsed.contents
-                ],
-                "pcres": [{"regex": p.regex, "flags": p.flags} for p in parsed.pcres],
-                "references": parsed.references,
-                "metadata": parsed.metadata,
-                "flow": parsed.flow,
-            }
+            with session.begin_nested():  # <-- SAVEPOINT: bu satır izole
+                options_dump = {
+                    "contents": [
+                        {
+                            "pattern_raw": c.pattern_raw,
+                            "nocase": c.nocase,
+                            "http_buffer": c.http_buffer,
+                            "negated": c.negated,
+                        }
+                        for c in parsed.contents
+                    ],
+                    "pcres": [{"regex": p.regex, "flags": p.flags} for p in parsed.pcres],
+                    "references": parsed.references,
+                    "metadata": parsed.metadata,
+                    "flow": parsed.flow,
+                }
 
-            existing = session.exec(
-                select(SnortRule).where(
-                    SnortRule.sid == parsed.sid, SnortRule.snort_version == snort_version
-                )
-            ).first()
-
-            if existing:
-                existing.rev = parsed.rev
-                existing.msg = parsed.msg
-                existing.classtype = parsed.classtype
-                existing.raw_rule = parsed.raw
-                existing.options_json = json.dumps(options_dump)
-                existing.ruleset_source = ruleset_source
-                existing.source_file = source_file
-                existing.synced_at = datetime.utcnow()
-                session.add(existing)
-            else:
-                session.add(
-                    SnortRule(
-                        sid=parsed.sid,
-                        snort_version=snort_version,
-                        gid=parsed.gid,
-                        rev=parsed.rev,
-                        msg=parsed.msg,
-                        classtype=parsed.classtype,
-                        action=parsed.action,
-                        protocol=parsed.protocol,
-                        src=parsed.src,
-                        src_port=parsed.src_port,
-                        direction=parsed.direction,
-                        dst=parsed.dst,
-                        dst_port=parsed.dst_port,
-                        raw_rule=parsed.raw,
-                        options_json=json.dumps(options_dump),
-                        ruleset_source=ruleset_source,
-                        source_file=source_file,
+                existing = session.exec(
+                    select(SnortRule).where(
+                        SnortRule.sid == parsed.sid, SnortRule.snort_version == snort_version
                     )
-                )
-            session.commit()  # <-- Her satır kendi transaction'ında bitiyor
+                ).first()
+
+                if existing:
+                    existing.rev = parsed.rev
+                    existing.msg = parsed.msg
+                    existing.classtype = parsed.classtype
+                    existing.raw_rule = parsed.raw
+                    existing.options_json = json.dumps(options_dump)
+                    existing.ruleset_source = ruleset_source
+                    existing.source_file = source_file
+                    existing.synced_at = datetime.utcnow()
+                    session.add(existing)
+                else:
+                    session.add(
+                        SnortRule(
+                            sid=parsed.sid,
+                            snort_version=snort_version,
+                            gid=parsed.gid,
+                            rev=parsed.rev,
+                            msg=parsed.msg,
+                            classtype=parsed.classtype,
+                            action=parsed.action,
+                            protocol=parsed.protocol,
+                            src=parsed.src,
+                            src_port=parsed.src_port,
+                            direction=parsed.direction,
+                            dst=parsed.dst,
+                            dst_port=parsed.dst_port,
+                            raw_rule=parsed.raw,
+                            options_json=json.dumps(options_dump),
+                            ruleset_source=ruleset_source,
+                            source_file=source_file,
+                        )
+                    )
             ingested += 1
-        except Exception:
-            logger.warning("SID %s işlenemedi, atlandı.", getattr(parsed, "sid", "?"))
-            session.rollback()  # <-- Session'ı bir sonraki satır için temiz bırak
-            skipped += 1
+        except Exception as e:
+            logger.warning("SID %s işlenemedi, atlandı: %s", getattr(parsed, "sid", "?"), e)
+            _record_skip(raw_line, f"db hatası: {e}")
             continue
 
-    return ingested, skipped
+        if (ingested + skipped) % BATCH_SIZE == 0:
+            session.commit()  # <-- Sadece her BATCH_SIZE satırda bir gerçek commit
+
+    session.commit()  # kalan satırları da kaydet
+    return ingested, skipped, skipped_samples
 
 
 def sync_offline_sample(session: Session) -> SyncLog:
@@ -171,7 +219,7 @@ def sync_offline_sample(session: Session) -> SyncLog:
     session.refresh(log)
 
     try:
-        ingested, skipped = _ingest_lines(
+        ingested, skipped, samples = _ingest_lines(
             session,
             _iter_rule_lines_from_local_sample(),
             snort_version="3.x",
@@ -179,12 +227,13 @@ def sync_offline_sample(session: Session) -> SyncLog:
         )
         with open("app/sample_rules_legacy_29.rules", "r", encoding="utf-8") as f:
             legacy_lines = f.readlines()
-        ingested2, skipped2 = _ingest_lines(
+        ingested2, skipped2, samples2 = _ingest_lines(
             session, legacy_lines, snort_version="2.9", ruleset_source="offline-sample"
         )
         log.status = "success"
         log.rules_ingested = ingested + ingested2
         log.rules_skipped = skipped + skipped2
+        log.skipped_samples = json.dumps((samples + samples2)[:MAX_SKIPPED_SAMPLES])
     except Exception as e:
         logger.exception("Offline örnek yükleme başarısız")
         log.status = "failed"
@@ -225,12 +274,13 @@ def sync_source(session: Session, source_key: str, existing_log: Optional[SyncLo
             )
         content = _download(spec["url"])
         lines = _iter_rule_lines_from_archive(content)
-        ingested, skipped = _ingest_lines(
+        ingested, skipped, samples = _ingest_lines(
             session, lines, snort_version=spec["snort_version"], ruleset_source=spec["key"]
         )
         log.status = "success"
         log.rules_ingested = ingested
         log.rules_skipped = skipped
+        log.skipped_samples = json.dumps(samples)
     except Exception as e:
         logger.exception("Senkronizasyon başarısız: %s", source_key)
         log.status = "failed"
@@ -264,7 +314,6 @@ def sync_all_live_sources(session: Session) -> list:
 # ANINDA bir "log_id" ile döner, gerçek iş arka planda devam eder, kullanıcı
 # arayüzü bu id'yi periyodik olarak sorgulayarak (polling) ilerlemeyi gösterir.
 # ---------------------------------------------------------------------------
-from app.database import engine  # noqa: E402  (döngüsel import'u önlemek için burada)
 
 
 def create_running_log(
@@ -335,7 +384,7 @@ def run_upload_background(log_id: int, file_name: str, content: bytes, snort_ver
             return
         try:
             lines = _iter_rule_lines_from_archive(content)
-            ingested, skipped = _ingest_lines(
+            ingested, skipped, samples = _ingest_lines(
                 session,
                 lines,
                 snort_version=snort_version,
@@ -343,12 +392,17 @@ def run_upload_background(log_id: int, file_name: str, content: bytes, snort_ver
                 source_file=file_name,
             )
             if ingested == 0:
+                sample_hint = ""
+                if samples:
+                    sample_hint = " Örnek atlanan satır: " + samples[0]["line"][:150]
                 raise RuntimeError(
-                    "Dosyadan hiçbir geçerli Snort kuralı (sid içeren satır) çıkarılamadı."
+                    "Dosyadan hiçbir geçerli Snort kuralı (sid içeren satır) çıkarılamadı. "
+                    "Dosya formatı (.rules/.txt/.tar.gz/.zip) veya içeriği hatalı olabilir." + sample_hint
                 )
             log.status = "success"
             log.rules_ingested = ingested
             log.rules_skipped = skipped
+            log.skipped_samples = json.dumps(samples)
         except Exception as e:
             logger.exception("Arka plan dosya yükleme başarısız: %s", file_name)
             log.status = "failed"
@@ -362,8 +416,9 @@ def run_upload_background(log_id: int, file_name: str, content: bytes, snort_ver
 def ingest_uploaded_file(
     session: Session, file_name: str, content: bytes, snort_version: str
 ) -> SyncLog:
-    """Kullanıcının arayüzden yüklediği bir .rules / .txt / .tar.gz dosyasını
-    veritabanına işler."""
+    """ESKİ/KULLANILMAYAN: main.py artık bunun yerine create_running_log +
+    run_upload_background (arka plan görevi) kullanıyor. Geriye dönük
+    uyumluluk için burada bırakıldı, ama çağrılmıyor."""
     log = SyncLog(
         status="running",
         snort_version=snort_version,
@@ -377,7 +432,7 @@ def ingest_uploaded_file(
 
     try:
         lines = _iter_rule_lines_from_archive(content)
-        ingested, skipped = _ingest_lines(
+        ingested, skipped, samples = _ingest_lines(
             session,
             lines,
             snort_version=snort_version,
@@ -388,11 +443,12 @@ def ingest_uploaded_file(
             raise RuntimeError(
                 "Dosyadan hiçbir geçerli Snort kuralı (sid içeren satır) çıkarılamadı. "
                 "Dosyanın .rules formatında olduğundan (ya da içindeki .rules dosyalarını "
-                "barındıran bir .tar.gz olduğundan) emin olun."
+                "barındıran bir .tar.gz/.zip olduğundan) emin olun."
             )
         log.status = "success"
         log.rules_ingested = ingested
         log.rules_skipped = skipped
+        log.skipped_samples = json.dumps(samples)
     except Exception as e:
         logger.exception("Manuel dosya yükleme başarısız: %s", file_name)
         log.status = "failed"
